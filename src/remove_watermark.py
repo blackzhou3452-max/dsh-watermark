@@ -647,26 +647,60 @@ def detect_multi(imgs, allow, args):
     all 10 outputs -- 4995 changed pixels of the user's picture, which is exactly
     what this tool promises never to do.
 
-    So each candidate component must show the one thing a watermark has and a patch
-    of background does not: **a drawn boundary**. Measured on the same 10 photos,
-    the mean gradient magnitude on a component's rim is 3.6 for the background
-    patch (below the frame's own median of 8.7) and 63-108 for every glyph -- a
-    factor of 20 between them, so this is not a close call.
+    Two tests, because either one alone has a documented failure on real batches:
 
-    It runs on the per-pixel median of the stack, which keeps the mark (present in
-    every frame) and cancels the different pictures. The mean-level difference
-    between a component and its ring was tried first and is the wrong statistic
-    here: this mark's white fill sits on light backgrounds, so its level difference
-    is only 9-12 levels while the background patch scores 0 -- any threshold that
-    separates those two is luck, whereas the boundary test separates them 20x.
+      1. ABSOLUTE AGREEMENT. The frames must actually agree over the component:
+         median spread <= --multi-max-spread. This is what "the same mark in every
+         frame" means. Measured on a real 10-photo batch, the mark's pixels vary by
+         21 levels across frames (JPEG + sub-pixel placement) while a patch of
+         background that merely happens to be *flatter than its surroundings* --
+         a smooth tabletop beside a vase, in photos whose backgrounds differ --
+         varies by 90. The ratio test alone flags that patch, because a flat patch
+         next to textured artwork has a low ratio no matter how much the frames
+         disagree inside it.
+      2. A DRAWN BOUNDARY. Mean gradient magnitude on the component's rim, either
+         >= --multi-min-edge or >= --multi-edge-ratio x the frame's median. A patch
+         of plain background that all frames share has no edge of its own (measured:
+         3.6, below the frame's own 8.7), whereas every glyph of a real mark scores
+         63-108. Without this test such a patch is painted over in every output.
+
+    And the candidate region is COMPLETED before it is used, because the criterion
+    above is scale-dependent and this is the bug that produced a blurry ghost of a
+    real watermark:
+
+      "spread is much lower than the neighbourhood's" only holds near the mark's
+      BORDER. In the middle of a mark wider than the local window, the window is
+      all mark, so the ratio is ~1 and the interior is never flagged. For a 207x55
+      real mark with 63-px windows the candidate came out as a RING around the
+      text: inpainting the ring pulls colours in from both sides and leaves the
+      glyph fills (never masked) sitting inside it -- measured on the second real
+      batch as a blurry white ghost of the watermark. The first batch escaped only
+      because its glyph strokes are 14 px, thinner than the window.
+
+    So closing the candidate and filling its enclosed holes is part of the
+    detector, not a cosmetic step. (A cut-back to per-frame "drawn structure" was
+    also tried and is worse: this mark's outline carries a high-pass of only 7
+    levels, so the cut-back deleted the mark itself. --multi-min-structure keeps it
+    available, off by default.)
     """
-    stack = np.stack([cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32) for im in imgs])
+    grays = [cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32) for im in imgs]
+    stack = np.stack(grays)
     spread = stack.max(axis=0) - stack.min(axis=0)
     k = args.window * 2 + 1
     local = cv2.blur(spread, (k, k))
     ratio = spread / np.maximum(local, 1e-3)
     raw = ((ratio < args.multi_ratio) & (local > args.multi_min_local)).astype(np.uint8)
     raw[allow == 0] = 0
+
+    if args.multi_min_structure > 0 and raw.any():
+        hps = [np.abs(g - cv2.medianBlur(np.clip(g, 0, 255).astype(np.uint8), 5).astype(np.float32))
+               for g in grays]
+        structure = np.median(np.stack(hps), axis=0)
+        raw[structure <= args.multi_min_structure] = 0
+    seed = raw > 0
+    if raw.any():
+        raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        raw = _fill_holes(raw > 0).astype(np.uint8)
 
     median_img = np.median(stack, axis=0)
     grad = cv2.magnitude(cv2.Sobel(median_img, cv2.CV_32F, 1, 0, ksize=3),
@@ -685,8 +719,22 @@ def detect_multi(imgs, allow, args):
                           int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
             comp = labels == i
             sub = comp[y:y + h, x:x + w].astype(np.uint8)
+            # Judged on the component's EVIDENCE pixels -- the ones the criterion
+            # actually flagged -- never on the filled geometry. Filling pulls in the
+            # background between glyphs, whose spread is large whenever the pictures
+            # differ; measuring agreement over that would reject a perfectly good
+            # mark (measured: the first real batch's mask collapsed 11091 -> 2352 px
+            # and the watermark came back the moment the fill was included here).
+            ev = comp & seed
+            comp_spread = float(np.median(spread[ev])) if ev.any() else float("inf")
             rim = (cv2.dilate(sub, k3) > 0) & (cv2.erode(sub, k3) == 0)
             edge = float(grad[y:y + h, x:x + w][rim].mean()) if rim.any() else 0.0
+            if args.multi_max_spread > 0 and comp_spread > args.multi_max_spread:
+                dropped.append({"area": area, "box": [x, y, w, h], "evidencePx": int(ev.sum()),
+                                "spread": round(comp_spread, 1), "rimEdge": round(edge, 1),
+                                "dropped": "the frames disagree here, so this is not the same "
+                                           "mark in every frame"})
+                continue
             if edge < args.multi_min_edge and edge < args.multi_edge_ratio * frame_grad:
                 dropped.append({"area": area, "box": [x, y, w, h], "rimEdge": round(edge, 1),
                                 "frameEdge": round(frame_grad, 1),
@@ -1301,10 +1349,26 @@ def build_parser():
     ap.add_argument("--no-require-core", dest="require_core", action="store_false",
                     help=argparse.SUPPRESS)
     # multi-image knobs
-    ap.add_argument("--multi-ratio", type=float, default=0.55)
+    ap.add_argument("--multi-ratio", type=float, default=0.65,
+                    help="a multi-image candidate must vary this much less across the frames "
+                         "than its own neighbourhood does. Measured on two real batches: a real "
+                         "mark's components sit at 0.48-0.57, every patch of shared background "
+                         "at 0.73-0.89, so 0.65 sits in the gap (the old default of 0.55 was "
+                         "inside the mark's own range and left no room)")
     ap.add_argument("--multi-min-local", type=float, default=6.0)
-    ap.add_argument("--multi-min-edge", type=float, default=12.0,
-                    help="min mean gradient magnitude on a multi-image candidate's rim: a "
+    ap.add_argument("--multi-min-structure", type=float, default=0.0,
+                    help="optional cut-back of a multi-image candidate to the structure present "
+                         "in every frame (median of the frames' high-pass). Measured harmful on "
+                         "both real batches -- a soft mark's outline carries only 7 levels -- so "
+                         "it is off by default; 0 disables")
+    ap.add_argument("--multi-max-spread", type=float, default=0.0,
+                    help="optional: a candidate's pixels must agree across frames to at least "
+                         "this level (median spread). OFF by default because it cannot be made "
+                         "to work: measured across two real batches, the first batch's real mark "
+                         "sits at 39-44 while a shared-background patch in the second sits at 47, "
+                         "so no threshold separates them and any value rejects one of the two "
+                         "marks. The relative criterion above is what actually separates them")
+    ap.add_argument("--multi-min-edge", type=float, default=12.0,                    help="min mean gradient magnitude on a multi-image candidate's rim: a "
                          "watermark has a drawn boundary, a patch of background the frames "
                          "happen to share does not (measured 63-108 vs 3.6 on real photos)")
     ap.add_argument("--multi-edge-ratio", type=float, default=3.0,
