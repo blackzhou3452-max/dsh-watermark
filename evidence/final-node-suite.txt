@@ -1,0 +1,21 @@
+>>> host layer test
+  [PASS] plugin_shape                   name=dsh-watermark inject=[tools,fs,subprocess]
+  [PASS] buildArgv_order                a.png b/ --rect 10,20,30,40 --search bottom-right --template sig.png --strategy template --k-sigma 2 --restore --json-out report.json
+  [PASS] buildArgv_skips_unknown        unknown keys and false booleans are not passed
+  [PASS] parseSummary                   {"ok":2,"fail":0,"total":2}
+  [PASS] parseSummary_absent            returns undefined
+  [PASS] renderResult                   去水印：成功 1/2 张｜策略 single
+  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (25 params)
+  [PASS] descriptor_shape               25 typed params, required=[paths]
+  [PASS] tool_registered                name=remove_watermark timeoutMs=900000
+  [PASS] python_detected                D:\python\python.exe cv2 4.12.0
+  [PASS] e2e_run_ok                     ok=true total=1 succeeded=1 exit=0
+  [PASS] e2e_output_exists              in\clean\shot-clean.png (under the run's temp dir), 12073 bytes
+  [PASS] e2e_result_shape               {"name":"shot.png","changedPct":7.3802,"maskPx":1417,"confidence":3.21}
+  [PASS] e2e_missing_output_caught      succeeded=0 failed=1
+  [PASS] e2e_dry_run                    dryRun=true files=1
+  [PASS] e2e_missing_input              the watermark tool exited 2 without writing a report
+
+[SUMMARY] passed 16 / failed 0
+
+EXITCODE=0

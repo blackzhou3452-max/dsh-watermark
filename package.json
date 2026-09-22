@@ -1,0 +1,103 @@
+{
+  "name": "dsh-watermark",
+  "version": "0.1.0",
+  "description": "Watermark removal for DeepSeek Harness: one host tool that strips platform watermarks (corner marks, arbitrary positions, light/dark/coloured, semi-transparent, tiled) from a batch of images, changing only the watermark's own pixels. Exact-signature mode inverts a known semi-transparent mark instead of painting over it; multi-image mode derives the mark from a stack; heuristic mode handles a single image.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.1.5-rc.1"
+    }
+  },
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "dsh-watermark",
+    "summary": "批量去水印：角标、任意位置、深浅/彩色/半透明/平铺都能处理，只改水印像素、不动画面其它内容；已知签名时可精确反解而不是涂抹。",
+    "categories": [
+      "图像",
+      "工具",
+      "内容处理"
+    ],
+    "surfaces": [
+      "host"
+    ],
+    "capabilities": {
+      "provides": [
+        "tool:remove_watermark"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.1.5-rc.1",
+      "node": ">=20"
+    },
+    "permissions": {
+      "filesystem": {
+        "read": [
+          "user-nominated paths only"
+        ],
+        "write": [
+          "user-nominated paths only (default: <input dir>/clean)"
+        ]
+      },
+      "process": [
+        "spawns python with opencv-python + numpy; the algorithm is not re-implemented in Node"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "PUBLISHING.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "watermark",
+    "watermark-removal",
+    "image",
+    "batch",
+    "inpaint",
+    "image-processing"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CHANGE_ME/dsh-watermark.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CHANGE_ME/dsh-watermark/issues"
+  },
+  "homepage": "https://github.com/CHANGE_ME/dsh-watermark#readme",
+  "author": "CHANGE_ME",
+  "scripts": {
+    "test": "node test/run.mjs",
+    "test:python": "python -X utf8 test/test_remove_watermark.py",
+    "test:signature": "python -X utf8 test/test_signature_and_lattice.py",
+    "test:all": "npm run test:python && npm run test:signature && npm test"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  }
+}

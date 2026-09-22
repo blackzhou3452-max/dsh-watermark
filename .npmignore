@@ -1,0 +1,8 @@
+# __pycache__ inside the whitelisted src/ and test/ directories would otherwise be
+# packed: `files` whitelists the directory, and .gitignore does not apply to it.
+__pycache__/
+*.pyc
+*.pyo
+evidence/
+publish/
+.git*/

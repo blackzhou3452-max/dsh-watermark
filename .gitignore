@@ -1,0 +1,18 @@
+# construction-time scratch: measurement scripts, probe runs, intermediate logs.
+# The three final raw outputs the README quotes are kept intentionally:
+#   evidence/final-python-suite.txt
+#   evidence/final-signature-suite.txt
+#   evidence/final-node-suite.txt
+evidence/*
+!evidence/final-*.txt
+
+node_modules/
+npm-debug.log*
+*.tsbuildinfo
+out/
+clean/
+masks/
+__pycache__/
+*.pyc
+watermark-signature.json
+watermark-signature.png

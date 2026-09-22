@@ -1,0 +1,21 @@
+>>> synthetic generality test (9 cases)
+  case                         hit  changed  rmse_pre rmse_post  spill px_true px_flag
+  [PASS] A_bright_right_dark         1.00    0.34%    134.42      1.14      0    811   1859
+  [PASS] B_dark_left_light           1.00    1.68%    127.30      1.30      0   3451   8745
+  [PASS] C_white_centre_busy         1.00    1.47%     59.51     11.41      0   2469   7142
+  [PASS] D_magenta_topright_grad     1.00    0.78%     75.41      1.45      0   1514   3807
+  [XFAIL] E_semi35_busy               0.00    0.00%     38.94     38.94      0   1175      0
+         -> rmse must drop below 19.47
+         -> flagged 0 of 1175 solid mark px
+         -> known limitation, documented in README section 3
+  [PASS] F_grey_big_busy             1.00    2.55%     71.13     17.74      0   9174  12281
+  [PASS] G_black_on_light            1.00    0.46%    118.72      0.82      0   1197   2516
+  [PASS] H_tiled_lattice             1.00    2.37%     23.17      2.80      0   3960  11448
+  [PASS] I_white_small_centre        1.00    0.67%     80.81     18.64      0   1048   3227
+  [PASS] J_clean_noop             0 changed pixels
+  [PASS] K_multi_image            5/5 outputs (exit 0)
+
+[SUMMARY] passed 10 / xfail 1 (known limitations) / xpass 0 / failed 0
+          xfail cases are NOT passes: see README section 3 for each one, with its measured numbers
+
+EXITCODE=0
