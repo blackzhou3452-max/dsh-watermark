@@ -1254,6 +1254,11 @@ def build_parser():
     ap.add_argument("--radius", type=int, default=5)
     ap.add_argument("--mode", default="telea", choices=["telea", "ns"])
     ap.add_argument("--suffix", default="-clean")
+    ap.add_argument("--out-ext", default="",
+                    help="output extension (default: the input's). Use png when the input is a "
+                         "JPEG: writing JPEG would re-compress every pixel of the picture, so "
+                         "the output would differ everywhere and no longer be a record of what "
+                         "the tool actually changed")
     ap.add_argument("--mask-out-dir", default="")
     ap.add_argument("--json-out", default="", help="write a machine-readable run report here")
     ap.add_argument("--overwrite", action="store_true")
@@ -1432,6 +1437,8 @@ def main(argv=None):
               "period": args.period or None, "files": []}
     for src in files:
         base, ext = os.path.splitext(os.path.basename(src))
+        if args.out_ext:
+            ext = args.out_ext if args.out_ext.startswith(".") else "." + args.out_ext
         out_dir = args.outdir or os.path.join(os.path.dirname(src), "clean")
         out_path = os.path.join(out_dir, base + args.suffix + ext)
         if not args.dry_run:

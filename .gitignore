@@ -16,3 +16,9 @@ __pycache__/
 *.pyc
 watermark-signature.json
 watermark-signature.png
+
+# User data, not source: the sample photos and the folder the tool writes results
+# into. Kept out of the published repo on purpose (10 MB of generated output and
+# someone's private pictures); regenerate them with the command in README §5.5.
+测试例/
+结果/

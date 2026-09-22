@@ -156,6 +156,8 @@ python src/remove_watermark.py 出图目录\ --template 平台签名.png --resto
 
 python src/remove_watermark.py 出图目录\ --period auto          # 平铺水印
 python src/remove_watermark.py 一批图\ --strategy multi          # ≥3 张同位置
+python src/remove_watermark.py 一批图\ --strategy multi --rect x,y,w,h -o 结果 --out-ext png
+                                                                 # 输出无损 PNG，不重压 JPEG
 ```
 
 退出码：`0` 全部成功，`1` 有文件失败（或自动周期不可信），`2` 参数/环境错误。
@@ -239,8 +241,8 @@ EXITCODE=0
   [PASS] parseSummary                   {"ok":2,"fail":0,"total":2}
   [PASS] parseSummary_absent            returns undefined
   [PASS] renderResult                   去水印：成功 1/2 张｜策略 single
-  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (25 params)
-  [PASS] descriptor_shape               25 typed params, required=[paths]
+  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (26 params)
+  [PASS] descriptor_shape               26 typed params, required=[paths]
   [PASS] tool_registered                name=remove_watermark timeoutMs=900000
   [PASS] python_detected                D:\python\python.exe cv2 4.12.0
   [PASS] e2e_run_ok                     ok=true total=1 succeeded=1 exit=0
@@ -284,6 +286,67 @@ $ dsh --profile wmtest --dump-config | grep -A1 dsh-watermark
 即：`dsh plugin add` 同时写好依赖与 `dsh.profile.bundles`，`cordis.patch.yml` 的挂载行
 真的进了合成后的 profile 树。（这个 `wmtest` 是一次性验证用 profile，验完已经删除，
 没有动你的 `web` profile。）
+
+### 5.5 真实图片实测：10 张豆包 AI 生成图（`测试例/` → `结果/`）
+
+输入是 10 张真实 JPEG（1280×1280），水印都是右下角同一位置的「豆包AI生成」：
+白字 + 细灰描边，字形范围 x 1058–1257 / y 1211–1253，**10 张完全一致**。
+
+先测清楚这是什么水印：字形填充色在 10 张里都是 **248–250**（标准差 ~2），而水印下方的
+背景在 **145–198** 之间变化 ⇒ 反推 alpha ≈ 0.9，即**近乎不透明**。两个后果：
+① 只能用 inpaint（除以 1−a = 0.1 会把噪声放大 10 倍，"精确反解"在这里没有意义）；
+② 跨图看水印像素几乎恒定 ⇒ 这正是 `--strategy multi` 最擅长的情况。
+
+**默认单图模式（`--search bottom-right`）在这批真实照片上失败**，失败方式值得记录：
+
+```
+>>> remove_watermark: 10 file(s) | strategy=single search=bottom-right rects=- [DRY RUN]
+    [OK]   微信图片_20260922215822_109_5.jpg inpainted 13218 px (0.807% of frame) [dry run]
+    [OK]   微信图片_20260922215823_110_5.jpg inpainted  4728 px (0.289% of frame) [dry run]
+    ...
+    [OK]   微信图片_20260922215827_113_5.jpg no watermark pixels matched (nothing written as 'removed') [dry run]
+    [OK]   微信图片_20260922215830_117_5.jpg no watermark pixels matched (nothing written as 'removed') [dry run]
+```
+
+掩码落在这 10 张照片**各自的内容**上（花瓣阴影、猫爪、桌沿），铺满右下象限
+（bbox 从搜索窗边界 x=637/y=957 一路到边缘），水印本身基本没被碰到；
+把搜索框缩到水印大小也不行——搜索区变小后，局部"背景水平"中值窗口里大半是水印自己，
+种子被自己压掉了。这就是 §3 里"单张图、水印未知、画面纹理很重 ⚠️"那条边界的真实案例：
+启发式在真实照片上会被画面自身的低对比结构带走。
+
+**改用 `--strategy multi` + 已知框**：
+
+```
+$ python -X utf8 src/remove_watermark.py 测试例 --strategy multi --search none \
+      --rect 1040,1185,250,90 -o 结果 --suffix "" --out-ext png
+    (multi: stacking 10 frames of size (1280, 1280))
+>>> remove_watermark: 10 file(s) | strategy=multi search=none rects=[(1040, 1185, 250, 90)]
+    [OK]   微信图片_20260922215822_109_5.jpg inpainted 11091 px (0.677% of frame)
+    ...
+[SUMMARY] ok 10 / fail 0 / total 10
+EXITCODE=0
+```
+
+掩码是**单个连通域 11091 px**，bbox x 1052–1263 / y 1205–1259，正好贴住字形
+（单图模式那 12k–18k px 是散的、位置也不对）。逐像素复核结果
+（`evidence/verify_results.py`，可复跑）：
+
+```
+image                changed    inside   outside
+215822_109_5           11054     11054         0
+...（10 张全部如此）
+total changed inside the mark box: 108797
+total changed OUTSIDE the mark box: 0
+[PASS] outside the watermark, the pictures are byte-for-byte the decoded originals
+```
+
+即**框外一个像素都没动**。视觉上：浅色背景那几张基本看不出处理痕迹；深色木纹那张在
+2× 放大下能看到笔画处极轻微的"过平滑"——填充区灰度标准差 18.2 → 9.1，已经低于旁边
+桌面的 11.7；`--radius 10/15` 只再好一点点（8.7 / 8.4），所以默认 5 就够。
+
+`--out-ext png` 是这次为此加的选项：输入是 JPEG，若按输入扩展名写回 JPEG，整幅图会被
+重新压缩一遍，输出就不再是"工具改了什么"的记录，框外也不再逐位相同。
+
 
 ---
 

@@ -5,8 +5,8 @@
   [PASS] parseSummary                   {"ok":2,"fail":0,"total":2}
   [PASS] parseSummary_absent            returns undefined
   [PASS] renderResult                   去水印：成功 1/2 张｜策略 single
-  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (25 params)
-  [PASS] descriptor_shape               25 typed params, required=[paths]
+  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (26 params)
+  [PASS] descriptor_shape               26 typed params, required=[paths]
   [PASS] tool_registered                name=remove_watermark timeoutMs=900000
   [PASS] python_detected                D:\python\python.exe cv2 4.12.0
   [PASS] e2e_run_ok                     ok=true total=1 succeeded=1 exit=0
