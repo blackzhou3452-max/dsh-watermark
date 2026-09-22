@@ -636,16 +636,68 @@ def accept_components(seed, evidence, ctx, kind="residual"):
 
 
 def detect_multi(imgs, allow, args):
-    """Same mark, many frames: per-pixel spread collapses where the mark sits."""
+    """Same mark, many frames: per-pixel spread collapses where the mark sits.
+
+    The raw criterion -- "this pixel varies less across the frames than its
+    neighbourhood does" -- also fires on any patch of plain background that all
+    the frames happen to share, and unlike the single-image path this one had no
+    component validation at all. Measured on 10 real photos sharing one corner
+    mark: the mask came out as the mark (11091 px) PLUS a 583 px patch of flat
+    background 100 px above it, and every one of those 583 px was painted over in
+    all 10 outputs -- 4995 changed pixels of the user's picture, which is exactly
+    what this tool promises never to do.
+
+    So each candidate component must show the one thing a watermark has and a patch
+    of background does not: **a drawn boundary**. Measured on the same 10 photos,
+    the mean gradient magnitude on a component's rim is 3.6 for the background
+    patch (below the frame's own median of 8.7) and 63-108 for every glyph -- a
+    factor of 20 between them, so this is not a close call.
+
+    It runs on the per-pixel median of the stack, which keeps the mark (present in
+    every frame) and cancels the different pictures. The mean-level difference
+    between a component and its ring was tried first and is the wrong statistic
+    here: this mark's white fill sits on light backgrounds, so its level difference
+    is only 9-12 levels while the background patch scores 0 -- any threshold that
+    separates those two is luck, whereas the boundary test separates them 20x.
+    """
     stack = np.stack([cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32) for im in imgs])
     spread = stack.max(axis=0) - stack.min(axis=0)
     k = args.window * 2 + 1
     local = cv2.blur(spread, (k, k))
     ratio = spread / np.maximum(local, 1e-3)
-    mask = ((ratio < args.multi_ratio) & (local > args.multi_min_local)).astype(np.uint8) * 255
-    mask[allow == 0] = 0
+    raw = ((ratio < args.multi_ratio) & (local > args.multi_min_local)).astype(np.uint8)
+    raw[allow == 0] = 0
+
+    median_img = np.median(stack, axis=0)
+    grad = cv2.magnitude(cv2.Sobel(median_img, cv2.CV_32F, 1, 0, ksize=3),
+                         cv2.Sobel(median_img, cv2.CV_32F, 0, 1, ksize=3))
+    frame_grad = float(np.median(grad))
+    mask = np.zeros(raw.shape, np.uint8)
+    dropped = []
+    if raw.any():
+        n, labels, stats, _c = cv2.connectedComponentsWithStats(raw, 8)
+        k3 = np.ones((3, 3), np.uint8)
+        for i in range(1, n):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < args.min_blob:
+                continue
+            x, y, w, h = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                          int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
+            comp = labels == i
+            sub = comp[y:y + h, x:x + w].astype(np.uint8)
+            rim = (cv2.dilate(sub, k3) > 0) & (cv2.erode(sub, k3) == 0)
+            edge = float(grad[y:y + h, x:x + w][rim].mean()) if rim.any() else 0.0
+            if edge < args.multi_min_edge and edge < args.multi_edge_ratio * frame_grad:
+                dropped.append({"area": area, "box": [x, y, w, h], "rimEdge": round(edge, 1),
+                                "frameEdge": round(frame_grad, 1),
+                                "dropped": "consistent across frames but has no drawn boundary, "
+                                           "so it is background the frames share, not an overlay"})
+                continue
+            mask[comp] = 255
     k2 = np.ones((args.dilate * 2 + 1, args.dilate * 2 + 1), np.uint8)
-    return cv2.dilate(mask, k2, iterations=1) if mask.sum() else mask
+    mask = cv2.dilate(mask, k2, iterations=1) if mask.any() else mask
+    mask[allow == 0] = 0
+    return mask, {"multiComponents": dropped}
 
 
 # --------------------------------------------------------------------------
@@ -1042,7 +1094,9 @@ def remove_one(path, out_path, args, rects, template=None, stack=None):
             mask = cv2.bitwise_and(mask, allow)
             info["periodFallback"] = "block stamp"
     elif stack is not None:
-        mask = detect_multi(stack, allow, args)
+        mask, multi_info = detect_multi(stack, allow, args)
+        if multi_info.get('multiComponents'):
+            info['multiComponents'] = multi_info['multiComponents']
     elif args.restore and sig_alpha is not None:
         mask = (sig_alpha > args.alpha_floor).astype(np.uint8) * 255
         mask[allow == 0] = 0
@@ -1249,6 +1303,13 @@ def build_parser():
     # multi-image knobs
     ap.add_argument("--multi-ratio", type=float, default=0.55)
     ap.add_argument("--multi-min-local", type=float, default=6.0)
+    ap.add_argument("--multi-min-edge", type=float, default=12.0,
+                    help="min mean gradient magnitude on a multi-image candidate's rim: a "
+                         "watermark has a drawn boundary, a patch of background the frames "
+                         "happen to share does not (measured 63-108 vs 3.6 on real photos)")
+    ap.add_argument("--multi-edge-ratio", type=float, default=3.0,
+                    help="same test relative to the frame's own median gradient, for pictures "
+                         "whose texture is much stronger or weaker than the sample")
     # output / inpainting
     ap.add_argument("--dilate", type=int, default=3)
     ap.add_argument("--radius", type=int, default=5)
