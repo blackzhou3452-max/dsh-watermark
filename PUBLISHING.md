@@ -6,12 +6,12 @@
 
 ## 0. 需要先替换的占位符
 
-`package.json` 里有 4 处 `CHANGE_ME`（`repository` / `bugs` / `homepage` / `author`），
+`package.json` 里有 4 处 `blackzhou3452-max`（`repository` / `bugs` / `homepage` / `author`），
 替换成你的 GitHub 账号后再发布：
 
 ```powershell
 cd D:\dsh-watermark
-(Get-Content package.json -Raw) -replace 'CHANGE_ME', '<你的 GitHub 用户名>' |
+(Get-Content package.json -Raw) -replace 'blackzhou3452-max', 'blackzhou3452-max' |
   Set-Content package.json -NoNewline
 ```
 
@@ -28,7 +28,7 @@ git commit --amend --reset-author --no-edit     # 重新署名已有提交
 ```powershell
 cd D:\dsh-watermark
 # 先在 github.com 上手动建一个空仓库 dsh-watermark（不要勾 README/gitignore）
-git remote add origin https://github.com/<你的 GitHub 用户名>/dsh-watermark.git
+git remote add origin https://github.com/blackzhou3452-max/dsh-watermark.git
 git branch -M main
 git push -u origin main
 ```
@@ -48,7 +48,7 @@ npm publish
 如果不想上 npm，用户也可以直接装 GitHub 源：
 
 ```powershell
-dsh plugin --profile web add github:<你的 GitHub 用户名>/dsh-watermark
+dsh plugin --profile web add github:blackzhou3452-max/dsh-watermark
 ```
 
 ## 3. 进插件市场（awesome-dsh-plugin registry）
@@ -60,11 +60,11 @@ dsh plugin --profile web add github:<你的 GitHub 用户名>/dsh-watermark
 ```json
 {
   "name": "dsh-watermark",
-  "owner": "<你的 GitHub 用户名>",
-  "url": "https://github.com/<你的 GitHub 用户名>/dsh-watermark",
+  "owner": "blackzhou3452-max",
+  "url": "https://github.com/blackzhou3452-max/dsh-watermark",
   "category": "tools",
   "description": { "en": "…", "zh": "…" },
-  "install": "dsh plugin --profile web add github:<你的 GitHub 用户名>/dsh-watermark",
+  "install": "dsh plugin --profile web add github:blackzhou3452-max/dsh-watermark",
   "added": "<YYYY-MM-DD>"
 }
 ```
