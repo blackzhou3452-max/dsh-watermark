@@ -1,0 +1,6 @@
+url: https://github.com/blackzhou3452-max/dsh-watermark
+name: blackzhou3452-max/dsh-watermark
+category: tools
+description:
+  en: 'Batch watermark removal for a set of images that share one mark: it needs three or more images of the same size, finds the mark from the fact that the mark stays put while the pictures change, and writes cleaned copies without touching the originals.'
+  zh: '批量去水印：需要同一尺寸的图片 ≥3 张且共用同一个水印，靠「水印不动、画面在动」找出水印，输出干净副本、绝不改动原图。'
