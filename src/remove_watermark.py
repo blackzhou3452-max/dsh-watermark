@@ -489,6 +489,8 @@ def detect_single(bgr, allow, args, shape_mask=None):
     if mask.any():
         confidence = float(best_mag[mask > 0].mean() / max(floor, 1e-6))
     return mask, {"floor": round(float(floor), 2),
+                  "acceptedComponents": sum(1 for c in stats_out if "dropped" not in c),
+                  "droppedComponents": sum(1 for c in stats_out if "dropped" in c),
                   "localLevelP50": round(float(np.median(level)), 2),
                   "seedPx": int((res_seed | seed_mean).sum()),
                   "collapseSeedPx": int(col_seed.sum()),
@@ -554,15 +556,31 @@ def accept_components(seed, evidence, ctx, kind="residual"):
             continue
         ev = comp & evidence
         if not ev.any():
+            stats_out.append({"seedArea": seed_area, "area": area, "box": [x, y, w, h],
+                              "source": kind, "dropped": "no evidence pixels"})
             continue
         r = best[ev]                             # (N,3) residual vectors of the evidence
         mean_vec = r.mean(axis=0)
+        # One direction, strictly. A looser "the residuals are collinear" version was
+        # tried because a white glyph with a dark outline (+19 and -35 on the same
+        # axis) cancels in the mean and was thrown away -- the diagnosis was right,
+        # but the looser test also accepts the photo's own grey texture, and the
+        # synthetic suite measured 10/1/0 -> 5/1/5 with spill on four cases. A
+        # solidity gate on top did not recover it. The reliable route for a mark with
+        # two colours is the shared-evidence strategy, which keeps this strict test.
         strength = float(np.sqrt(float((mean_vec ** 2).sum())))
         if strength < args.core_delta:
+            stats_out.append({"seedArea": seed_area, "area": area, "box": [x, y, w, h],
+                              "source": kind, "strength": round(strength, 2),
+                              "dropped": "residual too weak (needs --core-delta)"})
             continue
         if args.sign_consistency > 0.0:
             agree = float((r @ mean_vec > 0).mean())
             if agree < args.sign_consistency:
+                stats_out.append({"seedArea": seed_area, "area": area, "box": [x, y, w, h],
+                                  "source": kind, "agree": round(agree, 3),
+                                  "dropped": "no single direction: the component's residuals "
+                                             "cancel (needs --sign-consistency)"})
                 continue
         else:
             agree = float("nan")
@@ -1110,7 +1128,7 @@ def periodic_mask(shape, period, thickness):
     return mask
 
 
-def remove_one(path, out_path, args, rects, template=None, stack=None):
+def remove_one(path, out_path, args, rects, template=None, stacks=None):
     img = imread_any(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         return False, "cannot read", {}
@@ -1127,7 +1145,11 @@ def remove_one(path, out_path, args, rects, template=None, stack=None):
     if allow.sum() == 0 and args.search == "none" and not rects and not args.period:
         return False, "nothing to do: --search none needs --rect or --period", {}
 
-    info = {"strategy": args.strategy, "restore": bool(args.restore)}
+    stack = None
+    if stacks:
+        stack = stacks.get(bgr.shape[:2])
+    info = {"strategy": "multi" if stack is not None else args.strategy,
+            "restore": bool(args.restore)}
     sig_alpha = template["alpha"] if template else None
     sig_color = template["color"] if template else None
 
@@ -1143,6 +1165,7 @@ def remove_one(path, out_path, args, rects, template=None, stack=None):
             info["periodFallback"] = "block stamp"
     elif stack is not None:
         mask, multi_info = detect_multi(stack, allow, args)
+        info["sharedFrames"] = len(stack)
         if multi_info.get('multiComponents'):
             info['multiComponents'] = multi_info['multiComponents']
     elif args.restore and sig_alpha is not None:
@@ -1160,6 +1183,18 @@ def remove_one(path, out_path, args, rects, template=None, stack=None):
     changed = int((mask > 0).sum())
     total = mask.shape[0] * mask.shape[1]
     info["maskPx"] = changed
+    # --- is this run trustworthy? A watermark is ONE small group of pixels; a mask
+    # that covers a large share of the search area, or that is assembled from dozens
+    # of components, is the detector finding the photo instead. Measured: the shared
+    # -evidence path yields 2 components and ~2.4% of the corner area, whereas
+    # single-image mode on the same real photos accepts 78 components and 4-9%, and
+    # every one of those extra pixels is painted over. Reporting that beats hiding it.
+    allow_area = max(1, int((allow > 0).sum()))
+    accepted = info.get("acceptedComponents", 0)
+    info["searchAreaPx"] = allow_area
+    info["maskFracOfSearch"] = round(changed / allow_area, 4)
+    info["suspicious"] = bool(changed and (accepted > args.max_components
+                                           or changed > args.max_mask_frac * allow_area))
 
     out = img
     note = "no watermark pixels matched (nothing written as 'removed')"
@@ -1235,8 +1270,13 @@ def build_parser():
     ap = argparse.ArgumentParser(description="General batch watermark removal.")
     ap.add_argument("inputs", nargs="*", help="files or directories (walked)")
     ap.add_argument("-o", "--outdir", default="")
-    ap.add_argument("--search", default="all", choices=list(SEARCH.keys()),
-                    help="where to look (default all = whole frame)")
+    ap.add_argument("--search", default="auto", choices=list(SEARCH.keys()) + ["auto"],
+                    help="where to look. Default 'corners' (the four corner quartiles), because "
+                         "platform marks live there and searching the whole frame measurably "
+                         "damages the picture on real photos: measured on two 10-photo batches, "
+                         "--search all painted over 589324 and 654924 pixels of the picture, "
+                         "while --search corners painted exactly the mark and 0 pixels elsewhere. "
+                         "Use 'all' for a centred mark")
     ap.add_argument("--rect", action="append", default=[], help="x,y,w,h (repeatable)")
     ap.add_argument("--period", default="",
                     help="W,H lattice of a tiled mark, or 'auto' to estimate it")
@@ -1278,6 +1318,12 @@ def build_parser():
     ap.add_argument("--max-fill-ratio", type=float, default=6.0,
                     help="drop a component whose enclosed area exceeds this multiple of its own "
                          "outline (a ring traced around artwork, not a glyph); 0 disables")
+    ap.add_argument("--max-components", type=int, default=10,
+                    help="more accepted components than this and the run is reported as "
+                         "suspicious: a watermark is one small group, dozens of components "
+                         "means the photo was detected")
+    ap.add_argument("--max-mask-frac", type=float, default=0.08,
+                    help="same, for the share of the search area the mask covers")
     ap.add_argument("--min-seed-blob", type=int, default=12,
                     help="drop a seed component smaller than this before filling")
     ap.add_argument("--collapse-ratio", type=float, default=0.75,
@@ -1331,7 +1377,10 @@ def build_parser():
     ap.add_argument("--core-delta", type=float, default=6.0,
                     help="min |mean residual vector| of a component")
     ap.add_argument("--sign-consistency", type=float, default=0.7,
-                    help="min share of a component's pixels agreeing with its mean direction")
+                    help="min share of a component's pixels whose residual agrees with the "
+                         "component's mean residual vector: one direction, strictly. A mark "
+                         "drawn in two colours (white fill + dark outline) cancels in this "
+                         "mean and is rejected by design -- use --strategy multi for those")
     ap.add_argument("--min-saliency", type=float, default=5.0,
                     help="component residual level must exceed its own ring by this "
                          "factor (rejects artwork that merged with something sharp); 0 disables. "
@@ -1470,8 +1519,19 @@ def main(argv=None):
         return 2
 
     strategy = args.strategy
-    if strategy == "auto":
-        strategy = "template" if args.template else "single"
+    if strategy == "auto" and args.template:
+        strategy = "template"
+    if args.search == "auto":
+        # A known signature already says WHERE the mark is, so looking only at the
+        # corners would be wrong (measured: it made --restore a no-op). Automatic
+        # SEARCHING is for the detection modes, and there the corners are the right
+        # scope -- see the --search help for the numbers.
+        args.search = "all" if strategy == "template" else "corners"
+    # "auto" no longer means "one image at a time": when the batch has >=3 frames of
+    # one size, the cross-image evidence is far stronger than anything a single
+    # photo can offer (measured on two real batches: single-image mode finds the mark
+    # but also accepts ~78 components of the photo itself and damages ~10k px per
+    # image, while the shared-evidence mask is 2 components and 0 px of damage).
     args.strategy = strategy
     if args.period == "auto" and strategy == "multi":
         print("[FAIL] --period auto does not combine with --strategy multi")
@@ -1508,9 +1568,9 @@ def main(argv=None):
         print("[FAIL] --restore needs --template (the mark's shape/alpha)")
         return 2
 
-    stack = None
-    if strategy == "multi":
-        stack_imgs = []
+    stacks = {}
+    if strategy in ("multi", "auto"):
+        by_shape = {}
         for f in files:
             im = imread_any(f, cv2.IMREAD_UNCHANGED)
             if im is None:
@@ -1519,16 +1579,24 @@ def main(argv=None):
                 im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
             if im.shape[2] == 4:
                 im = im[:, :, :3]
-            stack_imgs.append(im)
-        if len(stack_imgs) < 3:
-            print("[FAIL] --strategy multi needs >=3 readable images (got %d)" % len(stack_imgs))
+            by_shape.setdefault(im.shape[:2], []).append(im)
+        for shape, group in sorted(by_shape.items(), key=lambda kv: -len(kv[1])):
+            if len(group) >= 3:
+                stacks[shape] = group
+        if strategy == "multi" and not stacks:
+            sizes = ", ".join("%dx%d x%d" % (s[1], s[0], len(g)) for s, g in by_shape.items())
+            print("[FAIL] --strategy multi needs >=3 images of the SAME size (found: %s)" % sizes)
             return 2
-        hw = {im.shape[:2] for im in stack_imgs}
-        if len(hw) != 1:
-            print("[FAIL] --strategy multi needs all images the same size")
-            return 2
-        stack = stack_imgs
-        print("    (multi: stacking %d frames of size %s)" % (len(stack), stack[0].shape[:2]))
+        for shape, group in stacks.items():
+            print("    (multi: stacking %d frames of size %s)"
+                  % (len(group), shape))
+        if strategy == "auto":
+            for shape, group in by_shape.items():
+                if shape not in stacks:
+                    print("    (single: %d frame(s) of size %s are too few to share evidence)"
+                          % (len(group), shape))
+            strategy = "multi" if stacks else "single"
+    stack = None
 
     if args.period == "auto":
         probe = imread_any(files[0], cv2.IMREAD_UNCHANGED)
@@ -1569,7 +1637,7 @@ def main(argv=None):
         if not args.dry_run:
             os.makedirs(out_dir, exist_ok=True)
         try:
-            ok, note, info = remove_one(src, out_path, args, rects, template, stack)
+            ok, note, info = remove_one(src, out_path, args, rects, template, stacks)
         except ValueError:
             print("[FAIL] %-28s no usable period" % os.path.basename(src))
             ok, note, info = False, "no usable period", {}
@@ -1580,6 +1648,12 @@ def main(argv=None):
         if ok:
             ok_n += 1
             print("    [OK]   %-28s %s" % (os.path.basename(src), note))
+            if entry.get("suspicious"):
+                print("    [WARN] %-28s the mask covers %.1f%% of the search area in %d "
+                      "component(s): this looks like the photo, not a watermark -- "
+                      "check --dry-run --mask-out-dir before trusting it"
+                      % (os.path.basename(src), 100.0 * entry.get("maskFracOfSearch", 0),
+                         entry.get("acceptedComponents", 0)))
         else:
             fail_n += 1
             print("    [FAIL] %-28s %s" % (os.path.basename(src), note))

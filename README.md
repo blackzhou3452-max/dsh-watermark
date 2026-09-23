@@ -130,6 +130,28 @@ observed = (1 - a) * original + a * color        (逐像素，a 与 color 由水
 
 ## 4. 安装与使用
 
+**用法就一句话：把目录丢给它。**
+
+```powershell
+python src/remove_watermark.py 出图目录\ -o 结果\ --out-ext png
+```
+
+它会自己决定怎么找水印：
+
+| 输入 | 它自动做什么 |
+| --- | --- |
+| 同一尺寸的图 ≥3 张 | **跨图证据**（`--strategy multi`）：水印不动、画面在动，最可靠的一路 |
+| 只有 1–2 张，或尺寸各不相同 | 退回**单图启发式**，结果不可信时打 `[WARN]` |
+| `--template` 给了签名 | 按签名精确反解（`--restore`），搜索范围自动放宽到全图（签名自己说明了水印在哪） |
+
+搜索范围默认 `auto` = **四个角**（平台水印都在角上）。这不是拍脑袋：在真实照片上量过，
+搜全图会**把画面本身涂掉 589324 / 654924 像素**，搜四个角则**刚好只动水印、框外 0 像素**
+（§5.5 有原始数字）；居中水印请显式给 `--search all`。
+
+真实两批共 21 张图、**完全不加任何参数**的结果：**20 张框外 0 像素改动**；第 21 张（竖幅、
+尺寸与其它图不同、只能走单图模式）由**工具自己打了 `[WARN]`**，我没有把它当结果交付
+（§5.6）。
+
 ```powershell
 # 挂到 web profile（本地开发用 link）
 dsh plugin --profile web add link:D:/dsh-watermark
@@ -146,18 +168,17 @@ dsh plugin --profile web add github:<owner>/dsh-watermark
 装好后对 agent 说一句话即可；也可以直接用命令行：
 
 ```powershell
-python src/remove_watermark.py 出图目录\                       # 最省事
-python src/remove_watermark.py 出图目录\ --search bottom-right  # 只在右下角找
+python src/remove_watermark.py 出图目录\                       # 最省事（自动选模式）
+python src/remove_watermark.py 出图目录\ --search all            # 水印在画面中间时
 python src/remove_watermark.py 出图目录\ --dry-run --mask-out-dir masks\   # 先看会改哪里
+python src/remove_watermark.py 出图目录\ --strategy single        # 强制单图模式
 
 # 学一次签名，之后一直复用（精确反解）
 python src/remove_watermark.py --learn 带水印.png 无水印.png --signature-out 平台签名.png
 python src/remove_watermark.py 出图目录\ --template 平台签名.png --restore
 
 python src/remove_watermark.py 出图目录\ --period auto          # 平铺水印
-python src/remove_watermark.py 一批图\ --strategy multi          # ≥3 张同位置
-python src/remove_watermark.py 一批图\ --strategy multi --rect x,y,w,h -o 结果 --out-ext png
-                                                                 # 输出无损 PNG，不重压 JPEG
+python src/remove_watermark.py 出图目录\ --out-ext png           # 输出无损 PNG，不重压 JPEG
 ```
 
 退出码：`0` 全部成功，`1` 有文件失败（或自动周期不可信），`2` 参数/环境错误。
