@@ -3,10 +3,7 @@
   [PASS] L2_restore_inverts     rmse vs the true clean image inside the mark: 41.74 -> 0.44 (needs < 14.61)
   [PASS] L3_negative_untouched  466831 px outside the signature support, 0 of them changed (must be 0)
   [PASS] L4_learn_refuses_empty exit 2, signature written: False, message: [FAIL] no usable pair (all pairs were unreadable or show no mark)
-  [PASS] P1_period_auto         hit 1.00, spill 0, exit 0 | (auto period: x=260 score=0.588 | y=200 score=0.388 -> accepted)
-  [PASS] B1_big_semi_transparent hit 0.77 on a 12017 px half-transparent mark (the old detector: 0 flagged px)
-  [PASS] B2_negative_untouched  the same busy frame without the mark: 0 changed pixels
 
-[SUMMARY] passed 7 / failed 0
+[SUMMARY] passed 4 / failed 0
 
 EXITCODE=0

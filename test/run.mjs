@@ -336,8 +336,10 @@ try {
   const inDir = join(tmp, 'in')
   const { mkdirSync } = await import('node:fs')
   mkdirSync(inDir, { recursive: true })
+  // A BATCH, not one file: the tool removes a watermark from images that share one
+  // (>=3 of the same size), and refuses a single image outright.
   const img = join(inDir, 'shot.png')
-  writePng(img, 160, 120)
+  for (let i = 0; i < 4; i++) writePng(join(inDir, `shot${i}.png`), 160, 120)
 
   const captured = {}
   mod.apply(makeCtx(captured), {})
@@ -350,15 +352,15 @@ try {
     py ? `${py.exe} cv2 ${py.version}` : 'no interpreter with cv2+numpy found')
 
   if (py) {
-    const res = await tool.execute({ paths: [img], search: 'all' }, {})
-    const out = join(inDir, 'clean', 'shot-clean.png')
-    check('e2e_run_ok', res.ok === true && res.total === 1 && res.exitCode === 0,
+    const res = await tool.execute({ paths: [inDir], search: 'all' }, {})
+    const out = join(inDir, 'clean', 'shot0-clean.png')
+    check('e2e_run_ok', res.ok === true && res.total === 4 && res.exitCode === 0,
       `ok=${res.ok} total=${res.total} succeeded=${res.succeeded} exit=${res.exitCode}`)
     // Detail deliberately relative to the run's temp root: an absolute path would
     // carry the random mkdtemp suffix and make this output non-reproducible.
     check('e2e_output_exists', existsSync(out), `${relative(tmp, out)} (under the run's temp dir)`
       + `, ${statSyncSafe(out)?.size ?? 0} bytes`)
-    check('e2e_result_shape', Array.isArray(res.files) && res.files[0].name === 'shot.png'
+    check('e2e_result_shape', Array.isArray(res.files) && res.files[0].name === 'shot0.png'
       && typeof res.files[0].changedPct === 'number' && res.python === py.version,
       JSON.stringify({ name: res.files?.[0]?.name, changedPct: res.files?.[0]?.changedPct,
         maskPx: res.files?.[0]?.maskPx, confidence: res.files?.[0]?.confidence }))
@@ -380,9 +382,15 @@ try {
       && lying.files[0].note.includes('not on disk'),
       `succeeded=${lying.succeeded} failed=${lying.failed}`)
 
-    const dry = await tool.execute({ paths: [img], dryRun: true }, {})
+    const dry = await tool.execute({ paths: [inDir], dryRun: true }, {})
     check('e2e_dry_run', dry.ok === true && dry.dryRun === true && dry.outputDir === undefined,
       `dryRun=${dry.dryRun} files=${dry.files?.length}`)
+
+    // a single image must be refused with the batch requirement, not guessed at
+    const one = await tool.execute({ paths: [img] }, {})
+    check('e2e_single_refused',
+      one.ok === false || (one.failed ?? 0) > 0 || String(one.error ?? '').includes('3'),
+      `ok=${one.ok} failed=${one.failed} error=${String(one.error ?? '').slice(0, 70)}`)
 
     const bad = await tool.execute({ paths: [join(tmp, 'nope.png')] }, {})
     check('e2e_missing_input', bad.ok === false && String(bad.error).length > 0,

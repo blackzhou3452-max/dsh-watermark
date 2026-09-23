@@ -1,10 +1,12 @@
 # dsh-watermark
 
-DSH 插件：**批量去水印**。给一个目录，把水印去掉，**只改水印像素**、不动画面其它内容。
+DSH 插件：**批量去水印**。给一个目录（同尺寸 ≥3 张、共用同一个水印），把水印去掉，
+**只改水印像素**、不动画面其它内容。
 
-> 状态：**宿主插件层已实现并在真实 harness 里装过、核心算法已重写并用合成样本实测、测试原始输出见 §5**。
-> 已实现的：启发式单图检测、精确签名反解（`--learn` / `--restore`）、多图叠加、平铺周期自动估计。
-> 未达标并已定位的：**1 个用例**（半透明 35% 水印压在噪声忙碌画面上），见 §3。
+> **本插件只支持批量。单张自动去水印已明确舍弃**，原因、实测数据与失败方式见 §2 ——
+> 那是"信息不足"，不是"再调调就行"。放弃的理由全部保留在下面，包括所有失败数字。
+>
+> 单张仍可用的两条**显式**路径：`--template`（你给出水印签名/形状）与 `--rect`（你给出框）。
 
 对外暴露一个 agent 工具：`remove_watermark`。
 
@@ -14,117 +16,101 @@ DSH 插件：**批量去水印**。给一个目录，把水印去掉，**只改�
 
 | 场景 | 支持 |
 | --- | --- |
-| 即梦 / 可灵 / 豆包等国产生图平台右下角角标 | ✅ |
-| 任意位置（中间、四角、边缘） | ✅ |
-| 深色水印、彩色水印（含"亮度相同只有颜色不同"的水印） | ✅ |
-| 平铺水印 | ✅ 周期可自动估计 |
-| 一批图**同一个水印、同一位置** | ✅ 且效果最好（`--strategy multi`） |
-| 你知道水印长什么样（有带 alpha 的 PNG，或有一对"带水印/无水印"图） | ✅ **精确反解**，不是涂抹 |
-| 单张图、水印未知、画面又很忙 | ⚠️ 见 §3 逐条实测边界 |
+| 一批同尺寸图，右下/四角等**同一位置**的同一水印（即梦/豆包/可灵等平台角标） | ✅ 默认路径 |
+| 水印在画面中间、或任意位置（同尺寸 ≥3 张） | ✅ 配 `--search all` 或 `--rect` |
+| 深色 / 白色 / 彩色（含"亮度相同只有颜色不同"）水印 | ✅ |
+| 半透明水印（同批次内） | ✅ 到 alpha≈0.35；更淡的见 §3 的实测边界 |
+| 平铺水印 | ⚠️ 能命中但精度不足，见 §3 |
+| 只有一张图、水印未知 | ❌ **已明确舍弃**（§2）。请用 `--template` 或 `--rect`，或凑够 3 张同尺寸再跑 |
+| 一批图尺寸不一致 | 同尺寸 ≥3 张的那一组照做，落单的**报错不猜**（退出码非 0） |
 
-说一句话就能用：
-
-> 把 `D:\出图\卡面` 里的水印去掉，然后抽查 3 张确认原图没被动。
+对 agent 说一句话：`把 D:\出图\卡面 里的水印去掉，然后抽查 3 张确认原图没被动。`
 
 ---
 
-## 1. 三种策略（按可靠性排序，这是本插件的核心设计）
+## 1. 它怎么找到水印（唯一自动路径）
 
-### 策略 A：精确签名（唯一算得上"还原"的模式）
+**跨图证据**：一批图共用同一个水印 ⇒ 水印不动、画面在动。于是逐像素看这一叠图的取值：
 
-水印是**半透明叠加**时（绝大多数平台角标都是），它就是一个确定的数学关系：
+- 水印盖住的像素在**所有帧里几乎一样**（spread 小）；
+- 画面自己的像素在帧间差异很大；
+- 判据是"这个像素比它**自己周围**安静得多"（`--multi-ratio`，实测水印 0.48–0.57、
+  背景 0.73–0.89，取 0.65），再过三道组件级校验：
+
+| 校验 | 依据 | 实测 |
+| --- | --- | --- |
+| **画出来的边界** | 水印是画上去的，共享的背景不是 | 水印边缘梯度 63–341；背景块 2.0–3.7 |
+| **周围参考** | 与候选**周围**的画面比，而不是与可能被自己填满的窗口比 | 见 §3 的已知限制 |
+| **[WARN] 哨兵** | 掩码占搜索区 >8% 或组件数 >10 → 打印"这看起来是照片不是水印" | 两批真实图：2 个组件、2.4% |
+
+外加**填洞**：水印比参考窗口宽时，判据只勾出它的"外环"，闭运算+填洞把本体补回来
+（不补的话 inpaint 只糊外环、字形填充留在原地 → 输出是水印的模糊白影，实测过）。
+
+**显式路径**（不算"自动"）：`--template` 给签名/形状 → 直接当掩码；配 `--restore` 则
+按 `original = (observed - a*color)/(1-a)` **精确反解**，而不是涂抹。
+
+---
+
+## 2. 为什么不做单张自动去水印（**这一节是决策依据，数字全部保留**）
+
+单张自动检测曾经实现过、也测过，最终**删除**。原因不是"难"，是**信息不足**：
+
+**① 它在真实照片上会去找画面自己的内容，水印基本没被碰到。** 两批真实照片（各 10 张）
+上用单图模式（`--search bottom-right`）：
 
 ```
-observed = (1 - a) * original + a * color        (逐像素，a 与 color 由水印决定)
-=>  original = (observed - a * color) / (1 - a)
+第一批  10 张：掩码 9688 px，改动 71924 px 在画面其它地方   水印仍在（水印相关度 0.84 vs 原图 0.94）
+第二批  10 张：掩码 1374 px，改动 40818 px 在画面其它地方   水印仍在（0.88）
 ```
 
-被盖住的像素可以**解出来**。签名的来源：
+掩码落在花瓣阴影、猫爪、桌沿上。把搜索框缩到水印大小也不行：搜索区一小，
+局部"背景水平"窗口里大半就是水印自己，水印把自己的证据压掉了（实测：水印内部
+spread 5.0、而参考值 4.3，比值 1.16 → 判据永不触发）。
 
-| 来源 | 做法 | 状态 |
+**② 强行放宽判据的代价，是合成套件从 10/1/0 掉到 5/1/5，且每张多改约 1 万像素。**
+把"方向一致"改成"共线性"（因为白字+深描边会在均值里互相抵消：strength 0.69 需要 ≥6、
+一致性 0.447 需要 ≥0.70，水印被自己丢掉）之后：单图模式在 20 张真实图上**全部找到了水印**
+（覆盖率 0.93–0.97），但同时接受 78 个画面自身的组件、每张多改约 1 万像素；再加"实心区"
+判据也救不回来。**这是信息不足问题，不是算法问题**——一张图里，"平台水印"和"照片自己的
+低对比结构"在统计上无法区分。所以删除，而不是留一个不敢用的开关。
+
+**③ 横向对比：同一个水印，批量路径的成绩。**
+
+| | 单图自动（已删） | 批量（现在的唯一路径） |
 | --- | --- | --- |
-| `--learn MARKED CLEAN` | 从一对"同图带水印/无水印"反解 `a` 与 `color`，写成可复用签名 PNG | ✅ 实测：真值 0.40 解出 0.401，模型解释度 0.9962（§5 L1） |
-| `--template sig.png --restore` | 用签名精确反解 | ✅ 实测：水印处 RMSE 41.74 → **0.44**（§5 L2） |
-| `--template shape.png`（无 alpha） | 单图自标定：先 inpaint 估背景，再用同一套最小二乘拟合 `a`/`color`（结果会打印出来） | ✅ 估计值，不是测量值 |
-
-> **不透明像素（a≈1）没有可恢复的原图**——除法会炸，任何算法都变不出被完全盖住的内容。
-> 这些像素会被列出来、改用 inpaint，并在结果里报数量，不藏。
-
-### 策略 B：多图叠加（不需要知道水印长什么样）
-
-一批图共享同一个水印位置时：水印不动、画面在动 ⇒ 逐像素看这一叠图的取值分布，
-水印覆盖处分布被压缩。`--strategy multi`（需要 ≥3 张同尺寸图）。
-
-### 策略 C：单图启发式（最通用、最不可靠）
-
-不知道水印、只有一张图时，靠"异常"猜。三重判据，全部围绕**同一个物理事实**：
-
-水印是叠加 ⇒ 残差向量 `r = 观测 − 局部背景 = a*(color − 背景)`，
-在整个水印上**方向一致**、强度可比；而画面纹理的残差方向互相抵消。
-
-1. **局部背景用中值而不是均值**——均值窗口会被水印自己的像素污染，窗口只要不比水印大很多，
-   残差就会朝 0 塌陷（这是旧版 README §3 记录、但一直没修的那条：大的洋红水印在半径 31 的窗口下
-   检测到 **0** 像素）。中值返回窗口内的多数值，水印占比不到一半时背景估计仍然落在背景上。
-2. **残差是三维向量**，不是灰度差——亮度与背景相同的彩色水印在灰度里是隐形的，
-   在向量里 `r ≈ (+150, −150, +150)`。实测用例 D（洋红压在亮度相近的渐变上）就是被这一条救回来的。
-3. **种子必须比"它自己周围的残差水平"强**，不是比 0 强——忙碌画面上画面自身的残差就有 40–90，
-   一个绝对阈值分不开。水印的笔画相对**紧邻环境**是异常（实测比值 3–6），画面的色块不是（比值 ~1）。
-4. **组件判决**：面积、残差强度、**方向一致性**（一个水印整体压在同一侧；纹理不断翻向），
-   以及 **纹理塌陷**——不透明水印会把画面纹理换成纯色，半透明水印把它按 (1−a) 压缩，
-   而画面自己的色块保留着自己的纹理。这一条是单图版的策略 B，也是忙碌画面上准确率的来源。
-
-最后接 `cv2.inpaint`（TELEA/NS），水印被它自己的周围替换——不是灰块，不是模糊补丁。
+| 两批真实图，水印是否去掉 | ❌ 基本没碰到 | ✅ 完全去掉（相关度 0.01–0.02，度量本底 0.07） |
+| 框外被改动的像素 | 40818 / 71924 px | **0 px** |
+| 掩码组件数 | 78 | 2 |
 
 ---
 
-## 2. 算法相对于 v0.1 的实测变化（同一套用例）
-
-第一版（`src/remove_watermark.py` 的旧实现）在本仓库的用例上跑不起来：单图路径有一个
-`args.sat_min` 未定义的崩溃，随后又暴露出 `core_delta` / `sign_consistency` 两个同样未定义的选项。
-把这三个缺陷补掉之后，才是**真正的算法基线 1/11**，然后才是改进：
-
-| | 基线（补掉崩溃后） | 现在 |
-| --- | --- | --- |
-| 合成用例通过 | **1 / 11** | **10 通过 / 1 已知限制** |
-| 单图检测（用例 A–I） | 4 个完全检测不到（B/D/G 命中 0，E 命中 0 且 16.6% 误改） | 8 个命中 1.00，误差全部为 0 溢出 |
-| 干净图（负向对照） | 失败：工具崩了，输出没生成 | **0 像素改动** |
-| 大号半透明水印 | 旧版 README §3 记录为"检测到 0 像素"（塌陷），一直没修 | 命中 0.77（§5 B1 回归用例，12017 px 水印） |
-| 平铺周期 | 必须手工 `--period` | `--period auto` 自动估出 `x=260 y=200`（真值 260/200） |
-
-基线为什么失败（诊断脚本 `evidence/diag.py` 的原始结论）：旧实现的"局部噪声尺度"用的是
-`blur(|残差|)`——**水印自己的边缘在抬高那个本该发现它的阈值**。9 个用例里
-`contrast=0`：方差项在所有用例上都没投出过一票，检测器恰好在信号最强的地方把自己关掉了。
-
----
-
-## 3. 能力边界（**实测数据，不要当成"万能"**）
+## 3. 能力边界（**实测数据**）
 
 | 情形 | 现状 | 实测 |
 | --- | --- | --- |
-| 纯色/渐变背景 + 不透明水印（任意深浅、任意位置） | ✅ | 命中 1.00，误差 0 溢出，水印处 RMSE 134→1.1 / 127→1.3 |
-| 亮度相同、只有颜色不同的水印 | ✅ | 命中 1.00，RMSE 75.4→1.45（灰度法在这里是隐形的） |
-| 忙碌画面 + 不透明水印 | ✅ | 命中 1.00，RMSE 59.5→11.3，0 溢出 |
-| 忙碌画面 + 中灰不透明大水印 | ✅ | 命中 1.00，RMSE 71.1→17.7 |
-| 平铺水印 | ✅ | 命中 1.00，周期自动估计正确 |
-| **半透明 35% + 噪声忙碌画面** | ❌ **已知限制** | 命中 **0.00**（默认参数下一个像素都不动；0 溢出） |
-| 单张图、水印未知、画面纹理很重 | ⚠️ | 缩窄 `--search` / 给 `--rect` 是最省事的办法；再不行只能靠策略 A/B |
+| 角标（默认 `--search corners`） | ✅ | 两批真实图 20/20 张：水印完全去掉、**框外 0 px** |
+| 纯色/渐变/忙碌背景上的不透明水印 | ✅ | 合成批次：命中 1.00、框外 0 px、水印处 RMSE 133→1.5 |
+| 亮度相同只有颜色不同的水印 | ✅ | 命中 1.00、RMSE 72→1.8（灰度法在这里是隐形的） |
+| 同一水印压在最忙的拼贴画面上（`--rect` 给框） | ⚠️ | 命中 1.00、框外 0，但**框内**水印处 RMSE 59→30，未达"减半"判据 |
+| 画面中间的同一水印 + `--rect` 给框 | ❌ 已知限制 | 见下 |
+| 半透明 35% + 忙碌画面（`--rect`） | ❌ 已知限制 | 见下 |
+| 平铺水印 | ❌ 已知限制 | 掩码 38289 px 对水印 3960 px，框外 7072 px（5 帧合计） |
+| 整帧搜索（`--search all`）找中间的水印 | ❌ 已知限制 | 候选区连成一片，一个 15686 px 的组件把水印吞进去，掩码占 5–7% 画面 |
 
-### 关于那唯一一个 ❌（不遮不掩）
+**已知限制的机制（不是"调参不够"）**：用 `--rect` 把搜索框贴在水印上时，
+"边缘参考值"取的是**搜索区内**梯度的 95 分位——而当搜索区就是水印自己时，这个参考值
+**就是水印自己的边缘**，等于要求水印打败自己，于是什么都找不到。这不是没试过修：
+每一条替代方案都实现并实测过，**每一条都要用真实批次的质量去换**：
 
-用例 `E_semi35_busy`：白色 `AI`，alpha=0.35，6px 笔画，压在带噪声的色块画面上。
+| 替代方案 | 修好了 | 代价（实测） |
+| --- | --- | --- |
+| 参考值改为候选周围的环 | 中间水印那一条 | 第一批的去除量 109853 px → 23235 px |
+| `--multi-ratio` 放到 0.70 | 35% 半透明那条 | 第二批画面被改 4033 px |
+| 边缘参考改为多尺度像素参考 | 颜色难分的那条 | 第二批 10 张**全部检测不到**（0 改动） |
 
-- 它的**单像素**残差是 `0.35 × (255 − 背景)` ≈ 19–79，而该画面的噪声 σ≈23 ⇒ 信噪比 **0.8–3.4**，
-  单像素阈值怎么调都分不开；
-- 它的**聚合**证据（纹理塌陷）在 6px 笔画的抗锯齿边缘上被摊平了：笔画太细，
-  边缘自身的 Laplacian 能量比内部的"压缩"更显眼。实测：笔画上平滑后的能量比中位数 0.94，
-  只有 34.6% 的像素低于 0.8 的检测阈值 ⇒ 碎片化 ⇒ 组件显著性 z 值 1.9–5.1，低于 6.0 的门槛。
+所以这些用例在测试里被**显式标为 XFAIL**（不是 PASS），每次运行都把原因和数字打出来。
 
-所以它被显式标成 `XFAIL`，**不计入通过**：测试输出里写的是
-`[XFAIL] E_semi35_busy` 和 `xfail 1 (known limitations)`，汇总行还额外打印
-"xfail cases are NOT passes"。README 不把它算作通过。
-
-**可用的补救**：这类水印换成 `--strategy multi`（同一批图 watermarked 多张）能直接解决——
-它用的是"画面在动、水印不动"的跨图证据，不受单图噪声限制。
+**不透明水印无法"还原"**，只能 inpaint；`--restore` 会报出有多少像素属于这种。
 
 ---
 
@@ -136,52 +122,29 @@ observed = (1 - a) * original + a * color        (逐像素，a 与 color 由水
 python src/remove_watermark.py 出图目录\ -o 结果\ --out-ext png
 ```
 
-它会自己决定怎么找水印：
+它会自己决定搜索范围（默认四个角），并在结果不可信时打 `[WARN]`。
+同尺寸不足 3 张、或某张尺寸与其它都不同，会**报错而不是退化成单张**：
 
-| 输入 | 它自动做什么 |
-| --- | --- |
-| 同一尺寸的图 ≥3 张 | **跨图证据**（`--strategy multi`）：水印不动、画面在动，最可靠的一路 |
-| 只有 1–2 张，或尺寸各不相同 | 退回**单图启发式**，结果不可信时打 `[WARN]` |
-| `--template` 给了签名 | 按签名精确反解（`--restore`），搜索范围自动放宽到全图（签名自己说明了水印在哪） |
-
-搜索范围默认 `auto` = **四个角**（平台水印都在角上）。这不是拍脑袋：在真实照片上量过，
-搜全图会**把画面本身涂掉 589324 / 654924 像素**，搜四个角则**刚好只动水印、框外 0 像素**
-（§5.5 有原始数字）；居中水印请显式给 `--search all`。
-
-真实两批共 21 张图、**完全不加任何参数**的结果：**20 张框外 0 像素改动**；第 21 张（竖幅、
-尺寸与其它图不同、只能走单图模式）由**工具自己打了 `[WARN]`**，我没有把它当结果交付
-（§5.6）。
+```
+[ERROR] 批量去水印需要至少 3 张同尺寸图片；单张/混合尺寸不受支持。
+        (batch removal needs >=3 images of the same size; a single image or mixed sizes are not supported)
+```
 
 ```powershell
 # 挂到 web profile（本地开发用 link）
 dsh plugin --profile web add link:D:/dsh-watermark
 
-# 或者从 GitHub 装（发布之后）
-dsh plugin --profile web add github:<owner>/dsh-watermark
-```
+# 水印在画面中间（这几种都要 >=3 张同尺寸）
+python src/remove_watermark.py 出图目录\ --search all
+python src/remove_watermark.py 出图目录\ --rect 250,280,190,50
 
-依赖：**Python 3 + opencv-python + numpy**（`pip install opencv-python numpy`）。
-算法**没有**用 Node 重写：它已经在 Python 里被合成样本实测过，重写要重新挣一遍这些证据；
-宿主层只负责找解释器、拼参数、收 JSON 报告、核对产出真的落盘。
-找不到带 cv2 的解释器时工具会直接说明，而不是静默失败。
-
-装好后对 agent 说一句话即可；也可以直接用命令行：
-
-```powershell
-python src/remove_watermark.py 出图目录\                       # 最省事（自动选模式）
-python src/remove_watermark.py 出图目录\ --search all            # 水印在画面中间时
-python src/remove_watermark.py 出图目录\ --dry-run --mask-out-dir masks\   # 先看会改哪里
-python src/remove_watermark.py 出图目录\ --strategy single        # 强制单图模式
-
-# 学一次签名，之后一直复用（精确反解）
+# 显式给签名 → 精确反解（此时不需要批量）
 python src/remove_watermark.py --learn 带水印.png 无水印.png --signature-out 平台签名.png
-python src/remove_watermark.py 出图目录\ --template 平台签名.png --restore
-
-python src/remove_watermark.py 出图目录\ --period auto          # 平铺水印
-python src/remove_watermark.py 出图目录\ --out-ext png           # 输出无损 PNG，不重压 JPEG
+python src/remove_watermark.py 单张.png --template 平台签名.png --restore
 ```
 
-退出码：`0` 全部成功，`1` 有文件失败（或自动周期不可信），`2` 参数/环境错误。
+依赖：**Python 3 + opencv-python + numpy**。找不到带 cv2 的解释器时工具会直接说明。
+退出码：`0` 全部成功，`1` 有文件失败（含"尺寸不匹配、无法共享证据"），`2` 参数/输入错误。
 
 ---
 
@@ -190,44 +153,56 @@ python src/remove_watermark.py 出图目录\ --out-ext png           # 输出无
 三个套件，全部是**真实运行**的输出与退出码。复现：
 
 ```powershell
-python -X utf8 test/test_remove_watermark.py          # 通用性：11 个合成用例
-python -X utf8 test/test_signature_and_lattice.py     # 签名反解 / 周期估计 / 回归
+python -X utf8 test/test_remove_watermark.py          # 批量通用性：9 个场景 x 5 帧
+python -X utf8 test/test_signature_and_lattice.py     # 签名反解（--learn/--template/--restore）
 node test/run.mjs                                     # 宿主插件层
 ```
 
-### 5.1 通用性用例（`test/test_remove_watermark.py`）
+### 5.1 批量通用性（`test/test_remove_watermark.py`）
+
+每个场景是 **5 帧**：同一个水印、5 张不同的画面。标记含义：`hit` 命中的水印像素比例；
+`changed` 全图被改比例；`rmse_pre/post` 水印框内相对**真正无水印原图**的 RMSE（后 < 前一半才算过）；
+`spill` 水印框外被改动的像素数（5 帧合计）**必须为 0**。
 
 ```
->>> synthetic generality test (9 cases)
+>>> batch generality test (10 cases x 5 frames each)
   case                         hit  changed  rmse_pre rmse_post  spill px_true px_flag
-  [PASS] A_bright_right_dark         1.00    0.34%    134.42      1.14      0    811   1859
-  [PASS] B_dark_left_light           1.00    1.68%    127.30      1.30      0   3451   8745
-  [PASS] C_white_centre_busy         1.00    1.47%     59.51     11.41      0   2469   7142
-  [PASS] D_magenta_topright_grad     1.00    0.78%     75.41      1.45      0   1514   3807
-  [XFAIL] E_semi35_busy               0.00    0.00%     38.94     38.94      0   1175      0
-         -> rmse must drop below 19.47
+  [PASS] A_bright_right_dark         1.00    0.43%    133.42      1.53      0    811   2483
+  [PASS] B_dark_left_light           1.00    1.97%    127.80      1.71      0   3451  10970
+  [XFAIL] C_white_centre_busy         0.00    0.00%    103.44    103.44      0   2469      0
+         -> rmse must drop below 51.72
+         -> flagged 0 of 2469 solid mark px
+         -> with --rect hugging the mark, the rim reference (p95 of the gradient over the search area) IS the mark's own edges, so the mark is asked to beat itself and nothing is found. Measured: ring reference per candidate fixes it and drops batch 1's removal from 109853 px to 23235 px
+  [PASS] D_magenta_topright_grad     1.00    0.98%     72.02      1.79      0   1514   4809
+  [XFAIL] E_semi35_busy               0.00    0.00%     37.12     37.12      0   1175      0
+         -> rmse must drop below 18.56
          -> flagged 0 of 1175 solid mark px
-         -> known limitation, documented in README section 3
-  [PASS] F_grey_big_busy             1.00    2.55%     71.13     17.74      0   9174  12281
-  [PASS] G_black_on_light            1.00    0.46%    118.72      0.82      0   1197   2516
-  [PASS] H_tiled_lattice             1.00    2.37%     23.17      2.80      0   3960  11448
-  [PASS] I_white_small_centre        1.00    0.67%     80.81     18.64      0   1048   3227
+         -> a 35%-alpha mark scales the across-frame spread by (1-a) = 0.65, exactly the shipping --multi-ratio, so the pixel criterion is decided by rounding; 0.70 fixes it and costs 4033 px of real picture on batch 2
+  [XFAIL] F_grey_big_busy             0.00    0.00%     59.31     59.31      0   9174      0
+         -> rmse must drop below 29.66
+         -> flagged 0 of 9174 solid mark px
+         -> same circular rim reference as C -- this mark's box is the search area. Its candidate map is otherwise perfect (measured: 9174 of 9174 mark px flagged before the reference test)
+  [PASS] G_black_on_light            1.00    0.61%    119.57      1.16      0   1197   3636
+  [XFAIL] H_tiled_lattice             1.00    3.91%     25.94      4.94   7098   3960  18966
+         -> touched 7098 px outside the mark, over the batch
+         -> a tiled mark covers the frame, so there is no smaller search area to scope it to; over patchwork art the mask reaches 38289 px for a 3960 px mark (hit 1.00, spill 7098 over the batch)
+  [XFAIL] I_white_small_centre        0.00    0.00%     73.59     73.59      0   1048      0
+         -> rmse must drop below 36.80
+         -> flagged 0 of 1048 solid mark px
+         -> same circular rim reference as C and F
+  [XFAIL] X_wholeframe_busy           1.00    1.02%     73.59     17.54   1906   1048   4914
+         -> touched 1906 px outside the mark, over the batch
+         -> centred mark searched over the whole frame on patchwork art; the candidate regions merge into one component that swallows the mark (15686 px) and the mask covers 5-7% of the frame
   [PASS] J_clean_noop             0 changed pixels
-  [PASS] K_multi_image            5/5 outputs (exit 0)
+  [PASS] K_too_few_refused        exit 2, message present
 
-[SUMMARY] passed 10 / xfail 1 (known limitations) / xpass 0 / failed 0
-          xfail cases are NOT passes: see README section 3 for each one, with its measured numbers
+[SUMMARY] passed 6 / xfail 6 (known limitations) / xpass 0 / failed 0
+          xfail cases are NOT passes: see README section 3, with their numbers
+
 EXITCODE=0
 ```
 
-列含义：`hit` = 命中的水印实心像素比例；`changed` = 全图被改动的像素比例；
-`rmse_pre/post` = 水印框内相对**真正的无水印原图**的 RMSE（后 < 前的一半才算过）；
-`spill` = 水印框（外扩 14px）之外被改动的像素数，**必须为 0**；
-`px_true/px_flag` = 真实水印像素数 / 工具标记的像素数。
-
-`spill` 全 0、`J_clean_noop` 0 改动，就是纪律里要求的**负向对照**：无水印的图一个像素都不许动。
-
-### 5.2 签名反解 / 周期估计 / 回归（`test/test_signature_and_lattice.py`）
+### 5.2 签名反解（`test/test_signature_and_lattice.py`）
 
 ```
 >>> signature / lattice / regression test
@@ -235,22 +210,11 @@ EXITCODE=0
   [PASS] L2_restore_inverts     rmse vs the true clean image inside the mark: 41.74 -> 0.44 (needs < 14.61)
   [PASS] L3_negative_untouched  466831 px outside the signature support, 0 of them changed (must be 0)
   [PASS] L4_learn_refuses_empty exit 2, signature written: False, message: [FAIL] no usable pair (all pairs were unreadable or show no mark)
-  [PASS] P1_period_auto         hit 1.00, spill 0, exit 0 | (auto period: x=260 score=0.588 | y=200 score=0.388 -> accepted)
-  [PASS] B1_big_semi_transparent hit 0.77 on a 12017 px half-transparent mark (the old detector: 0 flagged px)
-  [PASS] B2_negative_untouched  the same busy frame without the mark: 0 changed pixels
 
-[SUMMARY] passed 7 / failed 0
+[SUMMARY] passed 4 / failed 0
+
 EXITCODE=0
 ```
-
-- **L1**：真值 alpha=0.40、白色，解出 0.401 / `[255.2, 255.3, 255.1]`，模型解释度 0.9962——这是**绝对校验**，不是"跑通了"。
-- **L2**：用学到的签名反解，水印处 RMSE 41.74 → **0.44**（判据是 < 14.61）。
-  修之前是 41.74 → 47.13：签名是按水印自身尺寸写的，缺了 sidecar 里的位置就会被拉伸到整幅，
-  **越修越糟还报成功**。现在没有 sidecar 就报错，不猜。
-- **L3**：签名覆盖范围之外 466831 像素，**0 个被改动**（逐位相同）。
-- **P1**：`--period auto` 从图里估出 `x=260 y=200`（真值 260/200），自相关峰值 0.588 / 0.388，
-  命中 1.00、0 溢出；估不出来时工具会**拒绝猜**并退出 1，而不是压一个错的网格上去改干净像素。
-- **B1**：README §3 记录过的那个"大号半透明水印检测塌陷"，现在命中 0.77。
 
 ### 5.3 宿主插件层（`node test/run.mjs`）
 
@@ -262,178 +226,62 @@ EXITCODE=0
   [PASS] parseSummary                   {"ok":2,"fail":0,"total":2}
   [PASS] parseSummary_absent            returns undefined
   [PASS] renderResult                   去水印：成功 1/2 张｜策略 single
-  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (26 params)
-  [PASS] descriptor_shape               26 typed params, required=[paths]
+  [PASS] descriptor_json_schema         output.schema accepted; parameters rendered by the harness (22 params)
+  [PASS] descriptor_shape               22 typed params, required=[paths]
   [PASS] tool_registered                name=remove_watermark timeoutMs=900000
   [PASS] python_detected                D:\python\python.exe cv2 4.12.0
-  [PASS] e2e_run_ok                     ok=true total=1 succeeded=1 exit=0
-  [PASS] e2e_output_exists              in\clean\shot-clean.png (under the run's temp dir), 12073 bytes
-  [PASS] e2e_result_shape               {"name":"shot.png","changedPct":7.3802,"maskPx":1417,"confidence":3.21}
+  [PASS] e2e_run_ok                     ok=true total=4 succeeded=4 exit=0
+  [PASS] e2e_output_exists              in\clean\shot0-clean.png (under the run's temp dir), 9409 bytes
+  [PASS] e2e_result_shape               {"name":"shot0.png","changedPct":0,"maskPx":0}
   [PASS] e2e_missing_output_caught      succeeded=0 failed=1
-  [PASS] e2e_dry_run                    dryRun=true files=1
+  [PASS] e2e_dry_run                    dryRun=true files=4
+  [PASS] e2e_single_refused             ok=false failed=undefined error=the watermark tool exited 2 without writing a report
+[FAIL] no images 
   [PASS] e2e_missing_input              the watermark tool exited 2 without writing a report
 
-[SUMMARY] passed 16 / failed 0
+[SUMMARY] passed 17 / failed 0
+
 EXITCODE=0
 ```
 
-`descriptor_json_schema` 用**真实 harness 的校验器**（`@deepseek-ai/dsh-tools` 的
-`assertSupportedJsonSchema` 与参数渲染）验工具定义。该包不是本仓库依赖，所以：
+`descriptor_json_schema` 用**真实 harness 的校验器**验工具定义；该包不是本仓库依赖：
 
 ```powershell
-# 想在别处也真验一遍（否则该项会明确打印 skipped，不会假装通过）
 $env:DSH_TOOLS_PATH="<dsh 安装目录>\node_modules\@deepseek-ai\dsh-tools\lib\index.js"
 node test/run.mjs
 ```
 
-`e2e_missing_output_caught` 是防"假成功"的那一条：子进程报告写成功、但文件不在盘上，
-必须被报成失败（这条如果回归，插件就会开始骗人）。
-`e2e_run_ok` 等用例走的是**真实**路径：真找解释器、真 spawn、真写图，断言落在磁盘上。
-
-### 5.4 安装验证（真实 harness）
-
-```
-$ dsh plugin --profile wmtest add link:D:/dsh-watermark
-dependencies:
-+ dsh-watermark link:D:/dsh-watermark
-dsh: initialized profile wmtest at D:\dsh-home\profiles\wmtest
-
-$ dsh --profile wmtest --dump-config | grep -A1 dsh-watermark
-# == dsh-watermark
-- id: dsh-watermark
-  name: dsh-watermark
-```
-
-即：`dsh plugin add` 同时写好依赖与 `dsh.profile.bundles`，`cordis.patch.yml` 的挂载行
-真的进了合成后的 profile 树。（这个 `wmtest` 是一次性验证用 profile，验完已经删除，
-没有动你的 `web` profile。）
-
-### 5.5 真实图片实测：10 张豆包 AI 生成图（`测试例/` → `结果/`）
-
-输入是 10 张真实 JPEG（1280×1280），水印都是右下角同一位置的「豆包AI生成」：
-白字 + 细灰描边，字形范围 x 1058–1257 / y 1211–1253，**10 张完全一致**。
-
-先测清楚这是什么水印：字形填充色在 10 张里都是 **248–250**（标准差 ~2），而水印下方的
-背景在 **145–198** 之间变化 ⇒ 反推 alpha ≈ 0.9，即**近乎不透明**。两个后果：
-① 只能用 inpaint（除以 1−a = 0.1 会把噪声放大 10 倍，"精确反解"在这里没有意义）；
-② 跨图看水印像素几乎恒定 ⇒ 这正是 `--strategy multi` 最擅长的情况。
-
-**先说结论：这个工具在这批图上的真实成绩单**（`evidence/mode-matrix.py`，
-全部是工具自己找到的，没有人工喂给它任何框）：
-
-| 配置（工具自主） | 掩码 px | **动到画面其它内容** | **水印还在吗** | 退出码 |
-| --- | --- | --- | --- | --- |
-| `single --search bottom-right` | 9688 | **71924 px** | **在**（相关度 0.84 / 原图 0.94） | 0 |
-| `single --search all` | 75916 | **803914 px** | **在**（0.84） | 0 |
-| **`multi --search bottom-right`** | **11091** | **0 px** | **没了**（0.01） | 0 |
-| `multi --search all` | 26432 | 146361 px | 没了（0.01） | 0 |
-| `multi --period auto` | 11091 | 0 px | 没了（0.01） | 0 |
-
-"水印还在吗"不是靠眼看：10 张图的水印是同一个固定图案，把 10 张原图逐像素取中值就能保住
-水印、抵消掉各不相同的背景；拿这个模板去相关每一张输出的水印区域，**原图 0.94 → 单图模式
-0.84（图案还在）→ multi 模式 0.01（结构没了）**。
-
-单图模式在这批真实照片上**彻底失败**，失败方式值得记录：掩码落在这 10 张照片**各自的内容**
-上（花瓣阴影、猫爪、桌沿），铺满右下象限，水印基本没被碰到；把搜索框缩到水印大小也不行
-——搜索区一小，局部"背景水平"中值窗口里大半就是水印自己，种子被自己压掉了。
-这就是 §3 里"单张图、水印未知、画面纹理很重 ⚠️"那条边界的真实现场。
-
-**但上表也暴露了 multi 模式的一个真 bug，这次修掉了。** 修之前 multi
-（`--search bottom-right`）的掩码是 11674 px = 水印 11091 + **水印上方 100 px 处一块
-583 px 的平背景**——这 10 张照片恰好都在那儿是同一片平墙。multi 路径的掩码原来是个**裸阈值，
-完全没有组件级校验**（单图路径有，multi 路径没有），所以那块平背景被原样涂掉：10 张一共
-**4995 px 的画面被改**，正是这个工具保证不做的事。
-
-修法用的是"水印有、背景块没有"的那条性质：**画出来的边界**。在 10 张的逐像素中值图上量
-组件边缘的平均梯度——那块平背景是 **3.6**（比全图中位数 8.7 还低），而每个字都是
-**63–108**，差 20 倍，不是勉强分开：
-
-| 候选组件 | 面积 | 边缘梯度 | 结论 |
-| --- | --- | --- | --- |
-| 平背景块 | 583 px | 3.6 | 丢弃（没有画出来的边界） |
-| 「豆」等 9 个字 | 189–708 px | 63–108 | 保留 |
-
-（先试过"组件与周围环的亮度差"，是错的统计量：这个水印的白字压在浅色背景上，亮度差只有
-9–12 级，而背景块是 0——能分开这两者的阈值是碰运气，边界测试则是 20 倍。）
-
-修完之后的正式交付（**工具自主，无人工框**）：
-
-```
-$ python -X utf8 src/remove_watermark.py 测试例 --strategy multi --search bottom-right \
-      -o 结果 --suffix "" --out-ext png
-    (multi: stacking 10 frames of size (1280, 1280))
->>> remove_watermark: 10 file(s) | strategy=multi search=bottom-right rects=-
-    [OK]   微信图片_20260922215822_109_5.jpg inpainted 11091 px (0.677% of frame)
-    ...
-[SUMMARY] ok 10 / fail 0 / total 10
-EXITCODE=0
-```
-
-掩码 11091 px，bbox x 1052–1263 / y 1205–1259，正好贴住字形。逐像素复核
-（`evidence/verify_results.py`，可复跑）：
-
-```
-image                changed    inside   outside
-215822_109_5           11054     11054         0
-...（10 张全部如此）
-total changed inside the mark box: 108797
-total changed OUTSIDE the mark box: 0
-[PASS] outside the watermark, the pictures are byte-for-byte the decoded originals
-```
-
-即**框外一个像素都没动**。视觉上：浅色背景那几张看不出处理痕迹；深色木纹那张在 2× 放大下
-能看到笔画处极轻微的"过平滑"——填充区灰度标准差 18.2 → 9.1，已经低于旁边桌面的 11.7；
-`--radius 10/15` 只再好一点点（8.7 / 8.4），所以默认 5 就够。
-
-两条诚实的备注：
-1. `multi --search all` 仍然会动到画面（146361 px）：全图范围内还有别的区域在 10 张里恰好
-   相似又带边界。`--search` 缩窄窗口就是为此存在的，工具自己的帮助文本也这么写。
-2. `--out-ext png` 是这次为此加的：输入是 JPEG，若按输入扩展名写回 JPEG，整幅图会被重新
-   压缩一遍，输出就不再是"工具改了什么"的记录，框外也不可能逐位相同。
-
-### 5.6 第二批真实图片（`测试例/第二次` → `结果/第二次结果`）：又抓出两个真 bug
-
-第二批 11 张，同一个「豆包AI生成」角标，但**比第一批更软、对比更低**（白字压在浅色台面上）。
-其中 10 张是 1280×1280，1 张是 1279×1706。成绩单（`evidence/round2-matrix.py`，工具自主）：
-
-| 配置 | 掩码 px | **动到画面其它内容** | **水印还在吗** |
-| --- | --- | --- | --- |
-| `single --search bottom-right` | 1374 | **40818 px** | **在**（0.88 / 原图 0.97） |
-| `single --search all` | 75659 | **847633 px** | **在**（0.88） |
-| **`multi --search bottom-right`** | **11220** | **0 px** | **没了**（0.02，度量的本底是 0.07） |
-| `multi --search all` | 80337 | 654924 px | 没了 |
-| `multi`（把 11 张一起喂） | — | — | 退出码 2：`needs all images the same size` |
-
-**bug 1：掩码是水印外圈的"环"，不是水印本体。** 判据 `spread < 0.55 × 局部 spread` 只在
-水印**边缘**成立——在水印比局部窗口更宽的内部，窗口里全是水印，比值≈1，内部永远不会被选中。
-于是 207×55 的水印只被标出一个环；inpaint 这个环会把两侧颜色糊进去，而**从未被遮住的字形填充
-留在原地** → 输出是水印的模糊白影（第一批躲过这一劫，只因为它的笔画是 14 px，比 63 px 的窗口细）。
-修法：把"闭运算 + 填洞"做成检测器的一部分，而不是事后修饰。修完 markCorr 0.02。
-
-**bug 2：`--multi-ratio` 默认值 0.55 落在水印自己的取值范围内。** 两个批次一起量：
-
-| | 水印组件 ratio p50 | 背景组件 ratio p50 |
-| --- | --- | --- |
-| 第一批 | 0.48 – 0.53 | 0.73 – 0.89 |
-| 第二批 | 0.51 – 0.57 | 0.83 – 0.88 |
-
-0.55 挤在水印自己的范围里（第一批勉强过、第二批的区分度全无）。改成 **0.65**，落在中间的
-空隙里；两个批次用同一组默认值都干净通过。
-
-**两个试过但实测有害、因此默认关闭的判据**（都写进代码注释与 `--help`，不删）：
-绝对值一致性 `--multi-max-spread`（第一批真实水印 39–44，第二批一块共享背景 47——没有阈值能
-同时保住两者）；"每帧都有结构"的裁剪 `--multi-min-structure`（这个水印的描边高频只有 7 级，
-裁剪会把水印自己删掉）。
-
-**1 张没做成**：竖幅那张 1279×1706 进不了 `multi`（尺寸不一致是硬条件），只剩单图模式，
-而单图模式在这个水印上实测是"水印一个像素没动、画面被改 25248 px"。它没有被当作结果交出去，
-单独放在 `结果/第二次结果/_未采用（单图模式失败）/` 并附说明。可行的处理方式：把它和**其它
-同尺寸**的图放一起再跑一次 `multi`。
-
+`e2e_single_refused` 是这次决策的那条：**单张必须被拒绝**，不能悄悄退化成单图模式。
 
 ---
 
-## 6. 目录结构
+## 6. 真实图片端到端验证（两批共 21 张）
+
+`evidence/verify-all.py` 逐像素核对交付结果，**没有任何参数**（连 `--search` 都没给）：
+
+```
+$ python src/remove_watermark.py 测试例/第一次 -o 结果/第一次结果 --suffix "" --out-ext png
+    (shared evidence: 10 frames of size (1280, 1280))
+[SUMMARY] ok 10 / fail 0 / total 10                      exit 0
+
+$ python src/remove_watermark.py 测试例/第二次 -o 结果/第二次结果 --suffix "" --out-ext png
+    (shared evidence: 10 frames of size (1280, 1280))
+    (1 frame(s) of size (1706, 1279) cannot share evidence and will fail)
+[FAIL] 微信图片_20260922222303_119_5.jpg  批量去水印需要至少 3 张同尺寸图片；单张/混合尺寸不受支持。
+[SUMMARY] ok 10 / fail 1 / total 11                      exit 1   ← 落单那张按规矩失败，不猜
+
+$ python evidence/verify-all.py
+   → 两次合计：水印内改动 219613 px，框外改动 0 px
+[PASS] outside the watermark the pictures are the decoded originals
+```
+
+那张竖幅图（1279×1706，与其它 10 张尺寸不同）**没有被当作结果交付**：工具自己报了 `[FAIL]`，
+我也逐像素确认过它若走显式路径会被改坏（改动 42698 px，其中水印内 0 px）。处理办法是把它
+和**其它同尺寸**的图放一起再跑一次。
+
+---
+
+## 7. 目录结构
 
 ```
 dsh-watermark/
@@ -441,28 +289,14 @@ dsh-watermark/
 ├── cordis.patch.yml                # 挂载行：insert dsh-watermark
 ├── README.md                       # 本文件（含实测数据与原始输出）
 ├── PUBLISHING.md                   # 发布清单（GitHub / npm / registry PR）
-├── LICENSE                         # MIT
-├── lib/
-│   └── index.js                    # 宿主插件层：注册 remove_watermark 工具
-├── src/
-│   └── remove_watermark.py         # 核心算法 + CLI（策略 A/B/C + --learn + 周期估计）
+├── lib/index.js                    # 宿主插件层：注册 remove_watermark 工具
+├── src/remove_watermark.py         # 批量检测 + 签名反解 + CLI
 ├── test/
-│   ├── test_remove_watermark.py    # 11 个合成用例（通用性，含负向对照）
-│   ├── test_signature_and_lattice.py  # 签名反解 / 周期估计 / 回归用例
+│   ├── test_remove_watermark.py    # 批量通用性（9 场景 x 5 帧 + 负向对照 + 拒绝单张）
+│   ├── test_signature_and_lattice.py  # --learn / --template / --restore
 │   └── run.mjs                     # 宿主层：argv/解析/渲染/注册 + 真实端到端
-└── evidence/                       # 施工期测量脚本与原始输出（README 引用的在这里）
+└── evidence/                       # 施工期测量脚本与原始输出
 ```
-
----
-
-## 7. 已知的坑（照抄 §3，别当成"全部通过"）
-
-1. **`E_semi35_busy` 不过**：半透明 35% + 噪声忙碌画面，默认参数下一个像素都不动。标为 XFAIL，不计入通过。
-2. **单图启发式不可能对所有水印都稳**：没有额外信息时，某些画面上的水印与内容在统计上不可区分。
-   定位是"默认走最可靠的路（A/B），启发式兜底并把统计报出来"，所以请用 `--dry-run` + `--mask-out-dir` 先看。
-3. **不透明水印无法"还原"**，只能 inpaint；`--restore` 会报出有多少像素属于这种。
-4. **`--learn` 需要同一张图的带水印/无水印一对**（同一内容、同一尺寸）。平台不允许导出无水印版时，用 `--template` 或 `--strategy multi`。
-5. **`--period auto` 估不出来会直接失败（退出 1）**，不会硬猜：错的网格会去改干净像素。
 
 ## 8. 参考实现（同类插件的真实格式，已在本机核对）
 
