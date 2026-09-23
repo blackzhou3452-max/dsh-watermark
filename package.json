@@ -54,6 +54,7 @@
   },
   "files": [
     "lib",
+    "scripts",
     "src",
     "test",
     "cordis.patch.yml",
@@ -92,6 +93,7 @@
   "homepage": "https://github.com/blackzhou3452-max/dsh-watermark#readme",
   "author": "blackzhou3452-max",
   "scripts": {
+    "prepack": "node scripts/clean-pycache.mjs",
     "test": "node test/run.mjs",
     "test:python": "python -X utf8 test/test_remove_watermark.py",
     "test:signature": "python -X utf8 test/test_signature_and_lattice.py",
